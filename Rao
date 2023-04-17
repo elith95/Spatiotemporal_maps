@@ -1,0 +1,146 @@
+library(sf)
+library(rgee)
+library(raster)
+library(gtools)
+library(compositions)
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+
+ee_Initialize(drive=T)
+
+#Italy shp
+countries <- ee$FeatureCollection("FAO/GAUL/2015/level0")
+italy <- countries$filter(ee$Filter$eq('ADM0_CODE', 122))
+
+#Landsat image collections
+imc1990 <- ee$ImageCollection("LANDSAT/LT05/C02/T1_L2")$
+  filterDate('1990-01-01', '1990-12-31')
+imc2018 <- ee$ImageCollection("LANDSAT/LE07/C02/T1_L2")$
+    filterDate('2018-01-01', '2018-12-31')
+
+#Values for the mask
+#Valori per la maschera
+p <- permutations(n=2, r=5, v=c(0,1), repeats.allowed = T) 
+p <- split(p, seq(nrow(p)))
+v <- rep(0, 16)
+v[10] <- 1
+vpos <- c(2, 4, 6, 8, 14)
+mv <- lapply(p, function(x) {
+  v[vpos] <- x
+  achar <- paste(v, collapse="")
+  unbinary(achar)
+})
+mv <- unlist(mv)
+
+#Cloud mask
+imc1990m <- imc1990$map(function(x) {
+  return(x$updateMask(x$select("QA_PIXEL")$remap(mv, rep(1, length(mv)), 0)))
+})
+imc2018m <- imc2018$map(function(x) {
+  return(x$updateMask(x$select("QA_PIXEL")$remap(mv, rep(1, length(mv)), 0)))
+})
+
+#NDVI
+ndvi1990c <- imc1990m$map(function(x) {
+  return(x$addBands(x$normalizedDifference(c('SR_B4', 'SR_B3'))))
+})
+ndvi2018c <- imc2018m$map(function(x) {
+  return(x$addBands(x$normalizedDifference(c('SR_B4', 'SR_B3'))))
+})
+ndvi1990 <- ndvi1990c$select("nd")$median()$reproject(crs="EPSG:4326", scale = 500)
+#ndvi2018 <- imc2018m$select("NDVI")$median()$reproject(crs="EPSG:4326", scale = 500)
+ndvi2018 <- ndvi2018c$select("nd")$median()$reproject(crs="EPSG:4326", scale = 500)
+ndvi1990it <- ndvi1990$clipToCollection(italy)
+ndvi2018it <- ndvi2018$clipToCollection(italy)
+
+r1990 <- ee_as_raster(ndvi1990it, italy$geometry())
+r2018 <- ee_as_raster(ndvi2018it, italy$geometry())
+
+#Rao moving window 9x9
+m_t0 <- as.matrix(r1990[[1]]) 
+mw_t0 <- matrix(NA, nrow = (nrow(m_t0) + 8), ncol = (ncol(m_t0) + 8)) 
+mw_t0[-c(1:4, (nrow(mw_t0)-3):nrow(mw_t0)), -c(1:4, (ncol(mw_t0)-3):ncol(mw_t0))] <- m_t0 
+m_t1 <- as.matrix(r2018l[[1]]) 
+mw_t1 <- matrix(NA, nrow = (nrow(m_t1) + 8), ncol = (ncol(m_t1) + 8)) 
+mw_t1[-c(1:4, (nrow(mw_t1)-3):nrow(mw_t1)), -c(1:4, (ncol(mw_t1)-3):ncol(mw_t1))] <- m_t1 
+res <- unlist(Map(function(i,j) {
+  print(i)
+  t0 <- as.vector(mw_t0[(i-4):(i+4),(j-4):(j+4)])
+  t1 <- as.vector(mw_t1[(i-4):(i+4),(j-4):(j+4)])
+  #Calcolo la matrice di distanza per il Rao
+  d <- dist(cbind(t0, t1))
+  #Calcolo dell'indice
+  sum(as.matrix(d)) * 1/81 
+}, rep(5:(nrow(mw_t0)-4), each=(ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8)))) 
+
+rao_m <- matrix(res, ncol = ncol(m_t0), byrow = T)
+rao_r <- raster(rao_m, template = r1990[[1]])
+
+#Plot NDVI
+dfndvi <- as.data.frame(stack(ndvi1990, ndvi2018), xy = T)
+
+plndvi1990 <- ggplot(dfndvi, aes(x = x, y = y, fill = layer.1)) +
+  geom_raster() +
+  scale_fill_distiller(palette = "YlGn",
+                       direction = 1,
+                       limits = c(min(dfndvi$layer.1, na.rm = T),
+                                  max(dfndvi$layer.1, na.rm = T)),
+                       na.value = "transparent") +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position='bottom', 
+        plot.title = element_text(hjust = 0.1, size = 22), 
+        legend.text = element_text(size=20), 
+        legend.key.size = unit(2, 'cm'),
+        legend.title = element_blank())
+
+plndvi2018 <- ggplot(dfndvi, aes(x = x, y = y, fill = layer.2)) +
+  geom_raster() +
+  scale_fill_distiller(palette = "YlGn",
+                       direction = 1,
+                       limits = c(min(dfndvi$layer.1, na.rm = T),
+                                  max(dfndvi$layer.1, na.rm = T)),
+                       na.value = "transparent") +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position='bottom', 
+        plot.title = element_text(hjust = 0.1, size = 22), 
+        legend.text = element_text(size=20), 
+        legend.key.size = unit(2, 'cm'),
+        legend.title = element_blank())
+
+plndvi1990 | plndvi2018 + plot_layout(guides = "collect")
+
+#Plot Rao
+ndvidiff <- ndvi2018 - ndvi1990
+rao <- raster("Desktop/raoit.tif")
+dfrao <- as.data.frame(stack(rao, ndvidiff), xy = T)
+
+plrao <- ggplot(dfrao, aes(x = x, y = y, fill = layer.1)) +
+  geom_raster() +
+  scale_fill_viridis_c(na.value = "transparent") +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position='bottom', 
+        plot.title = element_text(hjust = 0.1, size = 22), 
+        legend.text = element_text(size=20),
+        legend.key.size = unit(2, 'cm'),
+        legend.title = element_blank())
+
+plndvi <- ggplot(dfrao, aes(x = x, y = y, fill = layer.2)) +
+  geom_raster() +
+  scale_fill_distiller(palette = "BrBG",
+                       direction = 1,
+                       na.value = "transparent") +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position='bottom', 
+        plot.title = element_text(hjust = 0.1, size = 22), 
+        legend.text = element_text(size=20), 
+        legend.key.size = unit(2, 'cm'),
+        legend.title = element_blank())
+
+plndvi + plrao
+
+
