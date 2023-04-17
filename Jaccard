@@ -56,6 +56,9 @@ res <- unlist(Map(function(i,j) {
   (length(setdiff(t0, t1)) + length(setdiff(t1, t0)))/length(union(t0, t1))    
 }, rep(5:(nrow(mw_t0)-4), each = (ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8))))
 
+jacc_m <- matrix(res, ncol = ncol(m_t0), byrow = T)
+jacc_r <- raster(jacc_m, template = r1990[[1]])
+
 #Jaccard Gain
 res <- unlist(Map(function(i,j) {  
   print(i)
@@ -66,7 +69,7 @@ res <- unlist(Map(function(i,j) {
 }, rep(5:(nrow(mw_t0)-4), each = (ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8))))
 
 jacg_m <- matrix(res, ncol = ncol(m_t0), byrow = T)
-jacg_r <- raster(jacg_m, template = r1990)
+jacg_r <- raster(jacg_m, template = r1990[[1]])
 
 #Jaccard loss
 res <- unlist(Map(function(i,j) {
@@ -78,7 +81,7 @@ res <- unlist(Map(function(i,j) {
 }, rep(5:(nrow(mw_t0)-4), each = (ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8))))
 
 jacl_m <- matrix(res, ncol = ncol(m_t0), byrow = T)
-jacl_r <- raster(jacl_m, template = r1990)
+jacl_r <- raster(jacl_m, template = r1990[[1]])
 
 #Landcover image
 df1990 <- as.data.frame(r1990, xy = T) 
