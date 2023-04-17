@@ -1,0 +1,212 @@
+library(sf)
+library(rgee)
+library(raster)
+library(gtools)
+library(compositions)
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+
+ee_Initialize(drive=T)
+
+#Corine Landcover
+im1990 <- ee$Image("COPERNICUS/CORINE/V20/100m/1990")
+im2018 <- ee$Image("COPERNICUS/CORINE/V20/100m/2018")
+im1990r <- im1990$reproject(crs="EPSG:4326", scale = 500)
+im2018r <- im2018$reproject(crs="EPSG:4326", scale = 500)
+
+#Italy shp
+countries <- ee$FeatureCollection("FAO/GAUL/2015/level0")
+italy <- countries$filter(ee$Filter$eq('ADM0_CODE', 122))
+it2018 <- im2018r$clipToCollection(italy)
+it1990 <- im1990r$clipToCollection(italy)
+
+#Palette Corine
+pal <- paste("#", it2018$get("landcover_class_palette")$getInfo(), sep = "")
+lab <- it2018$get("landcover_class_names")$getInfo()
+val <- it2018$get("landcover_class_values")$getInfo()
+col <- data.frame(pal, lab, val) %>% 
+  mutate(val = round(val/10, 0)) %>%
+  separate(lab, c("lab1", "lab2"), ";") %>%
+  unite("lab", lab1:lab2, sep = ";") %>%
+  group_by(val) %>%
+  filter(row_number()==1)
+  
+#Download R
+r1990 <- ee_as_raster(it1990, italy$geometry())
+r2018 <- ee_as_raster(it2018, italy$geometry())
+r1990[r1990==999] <- NA
+r1990[r1990==0] <- NA
+r2018[r2018==0] <- NA
+
+#Jaccard Index moving window 9x9
+m_t0 <- as.matrix(r1990[[1]]) 
+mw_t0 <- matrix(NA, nrow = (nrow(m_t0) + 8), ncol = (ncol(m_t0) + 8)) 
+mw_t0[-c(1:4, (nrow(mw_t0)-3):nrow(mw_t0)), -c(1:4, (ncol(mw_t0)-3):ncol(mw_t0))] <- m_t0 
+m_t1 <- as.matrix(r2018[[1]]) 
+mw_t1 <- matrix(NA, nrow = (nrow(m_t1) + 8), ncol = (ncol(m_t1) + 8)) 
+mw_t1[-c(1:4, (nrow(mw_t1)-3):nrow(mw_t1)), -c(1:4, (ncol(mw_t1)-3):ncol(mw_t1))] <- m_t1 
+
+res <- unlist(Map(function(i,j) {
+  print(i)
+  #Selezione della moving window per il pixel [i,j] al tempo t0 e t1
+  t0 <- mw_t0[(i-4):(i+4),(j-4):(j+4)][!is.na(mw_t0[(i-4):(i+4),(j-4):(j+4)])]
+  t1 <- mw_t1[(i-4):(i+4),(j-4):(j+4)][!is.na(mw_t1[(i-4):(i+4),(j-4):(j+4)])]
+  #Calcolo dell'indice
+  (length(setdiff(t0, t1)) + length(setdiff(t1, t0)))/length(union(t0, t1))    
+}, rep(5:(nrow(mw_t0)-4), each = (ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8))))
+
+#Jaccard Gain
+res <- unlist(Map(function(i,j) {  
+  print(i)
+  #Selezione della moving window per il pixel [i,j] al tempo t0 e t1
+  t0 <- mw_t0[(i-4):(i+4),(j-4):(j+4)][!is.na(mw_t0[(i-4):(i+4),(j-4):(j+4)])]
+  t1 <- mw_t1[(i-4):(i+4),(j-4):(j+4)][!is.na(mw_t1[(i-4):(i+4),(j-4):(j+4)])]
+  (length(setdiff(t1, t0))/length(union(t0, t1)))  
+}, rep(5:(nrow(mw_t0)-4), each = (ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8))))
+
+jacg_m <- matrix(res, ncol = ncol(m_t0), byrow = T)
+jacg_r <- raster(jacg_m, template = r1990)
+
+#Jaccard loss
+res <- unlist(Map(function(i,j) {
+  print(i)
+  #Selezione della moving window per il pixel [i,j] al tempo t0 e t1
+  t0 <- mw_t0[(i-4):(i+4),(j-4):(j+4)][!is.na(mw_t0[(i-4):(i+4),(j-4):(j+4)])]
+  t1 <- mw_t1[(i-4):(i+4),(j-4):(j+4)][!is.na(mw_t1[(i-4):(i+4),(j-4):(j+4)])]
+  (length(setdiff(t0, t1))/length(union(t0, t1)))  
+}, rep(5:(nrow(mw_t0)-4), each = (ncol(mw_t0)-8)), rep(5:(ncol(mw_t0)-4),(nrow(mw_t0)-8))))
+
+jacl_m <- matrix(res, ncol = ncol(m_t0), byrow = T)
+jacl_r <- raster(jacl_m, template = r1990)
+
+#Landcover image
+df1990 <- as.data.frame(r1990, xy = T) 
+df_pl <- df1990 %>%
+  rename("val" = "layer") %>%
+  mutate(val = round(val/10, 0)) 
+
+pl <- ggplot(df_pl, aes(x = x, y = y, fill = as.factor(val))) +
+  geom_raster() +
+  scale_fill_manual(values = col$pal, name = "", labels = col$lab, na.translate = F) +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position = "bottom", 
+        legend.text = element_text(size = 20),
+        legend.key.size = unit(1.4, 'cm'))
+        
+df2018 <- as.data.frame(r2018, xy = T) 
+df_pl1 <- df2018 %>%
+  rename("val" = "layer") %>%
+  mutate(val = round(val/10, 0)) 
+
+pl1 <- ggplot(df_pl1, aes(x = x, y = y, fill = as.factor(val))) +
+  geom_raster() +
+  scale_fill_manual(values = col$pal, name = "", labels = col$lab, na.translate = F) +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position = "bottom", 
+        legend.text = element_text(size = 20),
+        legend.key.size = unit(1.4, 'cm'))
+  
+pl + pl1 + plot_layout(guides = "collect") & theme(legend.position = 'bottom')
+
+#Jaccard index plot
+jacgl <- jacg - jacl
+
+dfj <- as.data.frame(stack(jac, jacgl), xy = T)
+
+plj <- ggplot(dfj, aes(x = x, y = y, fill = layer.1)) +
+  geom_raster() +
+  scale_fill_viridis_c(na.value = "transparent") +
+  coord_sf() +
+  ggthemes::theme_map() +
+  theme(legend.position='bottom', 
+        plot.title = element_text(hjust = 0.1, size = 22), 
+        legend.text = element_text(size=20),
+        legend.key.size = unit(2, 'cm'),
+        legend.title = element_blank())
+
+pljgl <- ggplot(dfj, aes(x = x, y = y, fill = layer.4)) +
+       geom_raster() +
+       scale_fill_distiller(palette = "RdBu",
+                            direction = -1,
+                            na.value = "transparent") +
+       coord_sf() +
+       ggthemes::theme_map() +
+       theme(legend.position='bottom', 
+                         plot.title = element_text(hjust = 0.1, size = 22), 
+                         legend.text = element_text(size=20), 
+                         legend.key.size = unit(2, 'cm'),
+                         legend.title = element_blank())
+
+plj + pljgl
+
+#Bar plot land cover
+countries <- ee$FeatureCollection("FAO/GAUL/2015/level1")
+nordit <- countries$filter(ee$Filter$inList('ADM1_CODE', ee$List(list(1620, 1621, 1623, 1624, 1627, 1632, 1634, 1635))))$geometry()
+cenit <- countries$filter(ee$Filter$inList('ADM1_CODE', ee$List(list(1622, 1625, 1631, 1633))))$geometry()
+sudit <- countries$filter(ee$Filter$inList('ADM1_CODE', ee$List(list(1616, 1617, 1618, 1619, 1626, 1628))))$geometry()
+sic <- countries$filter(ee$Filter$eq('ADM1_CODE', 1630))$geometry()
+sard <- countries$filter(ee$Filter$eq('ADM1_CODE', 1629))$geometry()
+
+l <- lapply(list(list("North", nordit), list("Centre", cenit), list("South", sudit), list("Sicily", sic), list("Sardinia", sard)), function(g) {
+  cl1990 <- im1990r$reduceRegion(
+    reducer = ee$Reducer$frequencyHistogram(),
+    geometry = g[[2]],
+    scale = 500)$values()$getInfo()
+  
+  cl2018 <- im2018r$reduceRegion(
+    reducer = ee$Reducer$frequencyHistogram(),
+    geometry = g[[2]],
+    scale = 500)$values()$getInfo()
+  
+  df1990_perc <- data.frame(as.integer(unlist(lapply(cl1990, names))), unlist(cl1990))
+  colnames(df1990_perc) <- c("cat", "val")
+  if(999 %in% df1990_perc$cat) df1990_perc <- df1990_perc[-nrow(df1990_perc),]
+  df1990_perc$val <- df1990_perc$val/sum(df1990_perc$val)*100
+  df1990_perc <- df1990_perc %>%
+    mutate(cat = round(cat/100, 0)) %>%
+    group_by(cat) %>%
+    summarise(val = sum(val))
+  
+  df2018_perc <- data.frame(as.integer(unlist(lapply(cl2018, names))), unlist(cl2018)) 
+  colnames(df2018_perc) <- c("cat", "val")
+  df2018_perc$val <- df2018_perc$val/sum(df2018_perc$val)*100
+  df2018_perc <- df2018_perc %>%
+    mutate(cat = round(cat/100, 0)) %>%
+    group_by(cat) %>%
+    summarise(val = sum(val))
+  
+  df_pln <- data.frame(rbind(df1990_perc, df2018_perc), c(rep("1990", nrow(df1990_perc)), rep("2018", nrow(df1990_perc))), rep(g[[1]], (nrow(df1990_perc)+nrow(df2018_perc))))
+  colnames(df_pln)[c(3, 4)] <- c("years", "area")
+  return(df_pln)
+})
+
+df <- do.call(rbind, l)
+
+col1 <- col %>% 
+  mutate(val = round(val/10, 0)) %>%
+  separate(lab, "lab") %>%
+  rename(cat = val) %>%
+  group_by(cat) %>%
+  filter(row_number()==1)
+
+df1 <- merge(df, col1, by = "cat")
+df1$area <- factor(df1$area, ordered = T, levels = c("North", "Centre", "South", "Sicily", "Sardinia"))
+
+ggplot(df1, aes(x = years, y = val, fill = as.character(cat))) + 
+  geom_bar(stat = "identity", position = "stack") +
+  facet_grid(~ area) +
+  scale_fill_manual(values = col1$pal, labels = unique(col1$lab), name = "") +
+  xlab("") +
+  ylab("") +
+  theme_bw() +
+  theme(legend.text = element_text(size=40), 
+        legend.key.size = unit(2, 'cm'),
+        legend.title = element_blank(),
+        axis.text = element_text(size = 40),
+        text = element_text(size = 40),
+        plot.subtitle = element_text(size = 60)) 
+
+
